@@ -24,6 +24,7 @@ class PortfolioAttributionApp:
     def load_model(self):
         """Load the trained model with robust error handling"""
         model_files_to_try = [
+            'trained_attribution_model_fixed_scalers.pth',  # Try fixed version first
             'trained_attribution_model.pth',
             'trained_attribution_model_fixed.pth', 
             'trained_attribution_model_emergency.pth'
@@ -234,7 +235,7 @@ class PortfolioAttributionApp:
             } for ticker in tickers}
     
     def create_portfolio_features(self, portfolio_data, market_data):
-        """Create features that match the trained model"""
+        """Create features that match the trained model exactly"""
         
         # Calculate basic portfolio metrics
         weights = np.array([item['weight'] for item in portfolio_data])
@@ -245,7 +246,7 @@ class PortfolioAttributionApp:
         portfolio_return = np.sum(weights * returns)
         portfolio_volatility = np.sqrt(np.sum((weights * volatilities) ** 2))  # Simplified calculation
         
-        # Create feature dictionary matching training data
+        # Create feature dictionary - Use training means for market features
         features = {
             'portfolio_return': portfolio_return,
             'benchmark_return': 0.0008,  # Approximate daily S&P 500 return
@@ -253,27 +254,38 @@ class PortfolioAttributionApp:
             'n_assets': len(portfolio_data),
             'max_weight': np.max(weights),
             'weight_concentration': np.sum(weights ** 2),  # Herfindahl index
-            'portfolio_volatility': portfolio_volatility,
-            'n_assets_used': len(portfolio_data)
+            # Use training means for market features (from diagnostics)
+            'SPY': 0.000374,    # Training mean for SPY
+            'VIX': 0.001858,    # Training mean for VIX (as return, not level!)
+            'TLT': -0.000082,   # Training mean for TLT  
+            'GLD': 0.000553     # Training mean for GLD
         }
         
-        # Add market data if available in training features
-        market_features = {
-            'SPY': 0.0008,  # Default market return
-            'VIX': 20.0,    # Default VIX level
-            'TLT': 0.0002,  # Default bond return
-            'GLD': 0.0001   # Default gold return
-        }
+        # Debug output to see what features we're creating
+        print(f"📊 Portfolio Analysis:")
+        print(f"   Holdings: {features['n_assets']}")
+        print(f"   Max Weight: {features['max_weight']:.1%}")
+        print(f"   Concentration (HHI): {features['weight_concentration']:.3f}")
+        print(f"   Portfolio Return: {features['portfolio_return']:.4f}")
+        print(f"   Excess Return: {features['excess_return']:.4f}")
         
-        # Only add features that were in the training data
-        for feature_name in self.attribution_engine.feature_columns:
-            if feature_name not in features:
-                if feature_name in market_features:
-                    features[feature_name] = market_features[feature_name]
-                else:
-                    features[feature_name] = 0.0  # Default to 0 for unknown features
+        # Ensure we have exactly the features the model expects
+        expected_features = self.attribution_engine.feature_columns
+        print(f"🔍 Expected features ({len(expected_features)}): {expected_features}")
+        print(f"🔍 Provided features ({len(features)}): {list(features.keys())}")
         
-        return features
+        # Create final feature vector in correct order
+        final_features = {}
+        for feature_name in expected_features:
+            if feature_name in features:
+                final_features[feature_name] = features[feature_name]
+            else:
+                print(f"⚠️ Missing feature '{feature_name}', using default 0.0")
+                final_features[feature_name] = 0.0
+        
+        print(f"✅ Final feature vector: {len(final_features)} features (matches model)")
+        
+        return final_features
     
     def calculate_attribution(self, portfolio_input, benchmark_return=0.0008):
         """Calculate portfolio attribution"""
@@ -284,79 +296,178 @@ class PortfolioAttributionApp:
             if not portfolio_data:
                 return "❌ Error: No valid portfolio data provided", None, None
             
-            # Normalize weights
+            # Calculate total weight and normalize
             total_weight = sum(item['weight'] for item in portfolio_data)
-            if abs(total_weight - 1.0) > 0.01:  # Allow small rounding errors
-                for item in portfolio_data:
-                    item['weight'] = item['weight'] / total_weight
-                print(f"⚠️ Weights normalized from {total_weight:.3f} to 1.000")
+            print(f"📊 Original total weight: {total_weight:.3f}")
             
-            # Get market data
+            if abs(total_weight - 100.0) > 1.0:  # Expecting percentage format
+                return f"❌ Error: Weights sum to {total_weight:.1f}%. Please ensure weights sum to 100%.", None, None
+            
+            # Convert percentages to decimals and normalize
+            for item in portfolio_data:
+                item['weight'] = item['weight'] / 100.0  # Convert % to decimal
+            
+            # Renormalize to ensure exact sum of 1.0
+            total_decimal_weight = sum(item['weight'] for item in portfolio_data)
+            for item in portfolio_data:
+                item['weight'] = item['weight'] / total_decimal_weight
+            
+            print(f"✅ Normalized weights sum to: {sum(item['weight'] for item in portfolio_data):.6f}")
+            
+            # Get market data first
             tickers = [item['ticker'] for item in portfolio_data]
             market_data = self.get_market_data(tickers)
+            
+            # Calculate portfolio metrics early
+            weights = np.array([item['weight'] for item in portfolio_data])
+            returns = np.array([market_data[item['ticker']]['avg_return'] for item in portfolio_data])
+            portfolio_return = np.sum(weights * returns)  # Calculate this early!
+            excess_return = portfolio_return - benchmark_return
+            
+            # Now check portfolio characteristics
+            n_holdings = len(portfolio_data)
+            max_weight = max(item['weight'] for item in portfolio_data)
+            concentration = sum(item['weight']**2 for item in portfolio_data)
+            
+            # Warning for unusual portfolios with specific guidance
+            warnings = []
+            model_confidence = "High"
+            
+            if n_holdings < 30:
+                warnings.append(f"⚠️ Only {n_holdings} holdings (model trained on 50-200)")
+                warnings.append(f"   → Consider adding more holdings for better attribution accuracy")
+                model_confidence = "Low"
+                
+            if max_weight > 0.12:  # 12%
+                warnings.append(f"⚠️ Max weight {max_weight:.1%} is very high (model expects <5%)")
+                warnings.append(f"   → Consider reducing position sizes")
+                model_confidence = "Low"
+            elif max_weight > 0.08:  # 8%
+                warnings.append(f"🟡 Max weight {max_weight:.1%} is high (model expects <5%)")
+                model_confidence = "Medium"
+                
+            if concentration > 0.08:
+                warnings.append(f"⚠️ Very high concentration (HHI: {concentration:.3f}) - model expects <0.02")
+                warnings.append(f"   → This portfolio is much more concentrated than training data")
+                model_confidence = "Low"
+            elif concentration > 0.04:
+                warnings.append(f"🟡 High concentration (HHI: {concentration:.3f}) - model expects <0.02")
+                model_confidence = "Medium"
+            
+            # Add portfolio return outlier check
+            portfolio_return_pct = portfolio_return * 100
+            if abs(portfolio_return_pct) > 2.0:  # >2% daily return is extreme
+                warnings.append(f"⚠️ Extreme daily return {portfolio_return_pct:.2f}% (model expects <0.5%)")
+                warnings.append(f"   → Attribution may be unreliable for extreme return days")
+                model_confidence = "Low"
             
             # Create features matching the trained model
             features = self.create_portfolio_features(portfolio_data, market_data)
             
-            # Convert to DataFrame with correct column order
+            # Convert to DataFrame with correct column order    
             features_df = pd.DataFrame([features])
             features_df = features_df.reindex(columns=self.attribution_engine.feature_columns, fill_value=0.0)
             
             # Make prediction using the trained model
             attribution_results = self.predict_with_trained_model(features_df)
             
-            # Calculate portfolio metrics
-            weights = np.array([item['weight'] for item in portfolio_data])
-            returns = np.array([market_data[item['ticker']]['avg_return'] for item in portfolio_data])
-            portfolio_return = np.sum(weights * returns)
-            excess_return = portfolio_return - benchmark_return
+            # Calculate final metrics (portfolio_return already calculated above)
             total_attribution = sum(attribution_results.values())
+            unexplained = excess_return - total_attribution
             
-            # Create results summary
+            # Calculate explanation ratio and add reliability assessment
+            explanation_ratio = (total_attribution / excess_return * 100) if abs(excess_return) > 1e-6 else 0
+            
+            # Check if we applied corrections
+            reliability_warning = attribution_results.pop('_reliability_warning', False)
+            
+            # Create results summary with confidence assessment
+            warning_text = "\n".join(warnings) + "\n" if warnings else ""
+            
+            reliability_text = ""
+            if reliability_warning:
+                reliability_text = "\n⚠️ ATTRIBUTION RELIABILITY WARNING:\nThis portfolio differs significantly from the model's training data.\nResults have been scaled down but may still be unreliable.\nConsider using a more diversified portfolio for better attribution accuracy.\n"
+            
             results_text = f"""
 📊 Portfolio Attribution Analysis
 ═══════════════════════════════════
 
-Portfolio Overview:
+{warning_text}{reliability_text}Portfolio Overview:
 • Holdings: {len(portfolio_data)} securities
+• Max Weight: {max_weight:.1%}
+• Concentration (HHI): {concentration:.3f}
 • Portfolio Return: {portfolio_return:.4f} ({portfolio_return*100:.2f}% daily)
 • Benchmark Return: {benchmark_return:.4f} ({benchmark_return*100:.2f}% daily)
 • Excess Return: {excess_return:.4f} ({excess_return*100:.2f}% daily)
-• Weight Concentration (HHI): {features['weight_concentration']:.3f}
 
 Attribution Breakdown (basis points):
 • Asset Selection: {attribution_results['asset_selection']*10000:.1f} bps
-• Allocation Effect: {attribution_results['allocation']*10000:.1f} bps  
+• Allocation Effect: {attribution_results['allocation']*10000:.1f} bps
 • Timing Effect: {attribution_results['timing']*10000:.1f} bps
 • Currency Effect: {attribution_results['currency']*10000:.1f} bps
 • Interaction Effect: {attribution_results['interaction']*10000:.1f} bps
 
-Total Explained: {total_attribution*10000:.1f} bps
-Unexplained: {(excess_return - total_attribution)*10000:.1f} bps
+Total Explained: {total_attribution*10000:.1f} bps ({explanation_ratio:.0f}% of excess return)
+Unexplained: {unexplained*10000:.1f} bps ({100-explanation_ratio:.0f}% of excess return)
 
-Model Confidence:
-• This model achieved 96% R² on test data
-• Directional accuracy: 99% overall
-• Best performance on Allocation & Currency effects
+Model Confidence: {model_confidence}
+{"✅ High confidence - portfolio matches training data" if model_confidence == "High" else 
+ "🟡 Medium confidence - some portfolio characteristics differ from training" if model_confidence == "Medium" else
+ "❌ Low confidence - portfolio significantly differs from training data"}
+• Original model achieved 96% R² on similar portfolios
+• For best results, use 50+ holdings with max 5% position sizes
             """
             
             # Create attribution chart
             attribution_chart = self.create_attribution_chart(attribution_results)
             
-            # Create portfolio composition chart
+            # Create portfolio composition chart  
             composition_chart = self.create_composition_chart(portfolio_data)
             
             return results_text, attribution_chart, composition_chart
             
         except Exception as e:
-            error_msg = f"❌ Error: {str(e)}\n\nPlease check your portfolio format:\nTICKER,WEIGHT\nAAPL,0.25\nMSFT,0.20"
+            import traceback
+            error_msg = f"❌ Error: {str(e)}\n\nFull traceback:\n{traceback.format_exc()}\n\nPlease check your portfolio format:\nTICKER,WEIGHT\nAAPL,25.0\nMSFT,20.0"
             return error_msg, None, None
     
     def predict_with_trained_model(self, features_df):
-        """Make prediction using the trained model"""
+        """Make prediction using the trained model with detailed debugging"""
         try:
+            print("\n🔍 MODEL PREDICTION DEBUG:")
+            print(f"Input features shape: {features_df.shape}")
+            print(f"Input features:")
+            for i, (name, value) in enumerate(zip(self.attribution_engine.feature_columns, features_df.iloc[0])):
+                print(f"  {name}: {value:.6f}")
+            
             # Scale features
             features_scaled = self.attribution_engine.scaler_features.transform(features_df.values)
+            print(f"Scaled features range: [{features_scaled.min():.3f}, {features_scaled.max():.3f}]")
+            
+            # Show which features are extreme
+            print("🔍 Scaled feature analysis:")
+            for i, (name, scaled_val) in enumerate(zip(self.attribution_engine.feature_columns, features_scaled[0])):
+                if abs(scaled_val) > 5:  # Anything >5 standard deviations is extreme
+                    print(f"  ⚠️ {name}: {scaled_val:.2f} (EXTREME - outside training distribution)")
+                elif abs(scaled_val) > 2:
+                    print(f"  🟡 {name}: {scaled_val:.2f} (high)")
+                else:
+                    print(f"  ✅ {name}: {scaled_val:.2f} (normal)")
+            
+            # Show training scaler parameters for comparison
+            print(f"\n📊 Training data statistics (what model expects):")
+            scaler = self.attribution_engine.scaler_features
+            for i, name in enumerate(self.attribution_engine.feature_columns):
+                train_mean = scaler.mean_[i] if hasattr(scaler, 'mean_') else 0
+                train_scale = scaler.scale_[i] if hasattr(scaler, 'scale_') else 1
+                current_val = features_df.iloc[0, i]
+                
+                print(f"  {name}:")
+                print(f"    Training mean: {train_mean:.6f}")
+                print(f"    Training std:  {train_scale:.6f}")
+                print(f"    Your value:    {current_val:.6f}")
+                print(f"    Z-score:       {(current_val - train_mean) / train_scale:.2f}")
+                print()
             
             # Make prediction
             self.attribution_engine.model.eval()
@@ -365,14 +476,52 @@ Model Confidence:
                 predictions = self.attribution_engine.model(features_tensor)
                 predictions_scaled = predictions.numpy()
             
+            print(f"Raw model output range: [{predictions_scaled.min():.6f}, {predictions_scaled.max():.6f}]")
+            
             # Inverse transform predictions
             predictions_original = self.attribution_engine.scaler_targets.inverse_transform(predictions_scaled)
+            print(f"After inverse transform: [{predictions_original.min():.6f}, {predictions_original.max():.6f}]")
             
             # Return as dictionary
             attribution_dict = {
                 component: float(pred) for component, pred in 
                 zip(self.attribution_engine.target_columns, predictions_original[0])
             }
+            
+            print(f"Final attribution predictions (in decimals):")
+            for comp, val in attribution_dict.items():
+                print(f"  {comp}: {val:.6f} ({val*10000:.1f} bps)")
+            
+            # Check if predictions are reasonable
+            total_pred = sum(attribution_dict.values())
+            excess_return = features_df['excess_return'].iloc[0]
+            
+            print(f"\n📊 SCALING CHECK:")
+            print(f"Excess Return: {excess_return:.6f} ({excess_return*10000:.1f} bps)")
+            print(f"Total Predicted: {total_pred:.6f} ({total_pred*10000:.1f} bps)")
+            print(f"Prediction/Excess Ratio: {total_pred/excess_return:.1f}x" if abs(excess_return) > 1e-6 else "N/A")
+            
+            if abs(total_pred/excess_return) > 3 if abs(excess_return) > 1e-6 else False:
+                print("🚨 CRITICAL: Predictions are much larger than excess return!")
+                print("This indicates the portfolio is very different from training data.")
+                
+                # More aggressive scaling for extreme cases
+                if abs(total_pred/excess_return) > 10:
+                    scale_factor = 0.1  # Cap at 10% of prediction magnitude
+                    print(f"🔧 Applying aggressive scale factor: {scale_factor:.3f}")
+                else:
+                    scale_factor = min(abs(excess_return / total_pred), 0.5) if abs(total_pred) > 1e-6 else 1.0
+                    print(f"🔧 Applying moderate scale factor: {scale_factor:.3f}")
+                
+                for comp in attribution_dict:
+                    attribution_dict[comp] *= scale_factor
+                
+                print("🔧 Corrected predictions:")
+                for comp, val in attribution_dict.items():
+                    print(f"  {comp}: {val:.6f} ({val*10000:.1f} bps)")
+                    
+                # Add warning about reliability
+                attribution_dict['_reliability_warning'] = True
             
             return attribution_dict
             
