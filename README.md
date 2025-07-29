@@ -1,4 +1,8 @@
-AI assisted project to create a portfolio attribution tool using a combination of Claude and OpenAI tools.
+AI assisted project to create a portfolio attribution tool using a combination of Claude and OpenAI tools. 
+
+WORK IN PROGRESS
+1. Adding more models for different portfolio sizes
+2. Cleanup of diagnostic logging
 
 ### How to Use:
             1. **Enter Portfolio**: List holdings with format `TICKER,WEIGHT` (one per line)
