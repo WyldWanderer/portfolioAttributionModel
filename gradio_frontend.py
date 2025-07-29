@@ -375,8 +375,9 @@ class PortfolioAttributionApp:
             total_attribution = sum(attribution_results.values())
             unexplained = excess_return - total_attribution
             
-            # Calculate explanation ratio and add reliability assessment
+            # Calculate explanation ratio correctly
             explanation_ratio = (total_attribution / excess_return * 100) if abs(excess_return) > 1e-6 else 0
+            unexplained_ratio = (unexplained / excess_return * 100) if abs(excess_return) > 1e-6 else 0
             
             # Check if we applied corrections
             reliability_warning = attribution_results.pop('_reliability_warning', False)
@@ -408,7 +409,7 @@ Attribution Breakdown (basis points):
 • Interaction Effect: {attribution_results['interaction']*10000:.1f} bps
 
 Total Explained: {total_attribution*10000:.1f} bps ({explanation_ratio:.0f}% of excess return)
-Unexplained: {unexplained*10000:.1f} bps ({100-explanation_ratio:.0f}% of excess return)
+Unexplained: {unexplained*10000:.1f} bps ({unexplained_ratio:.0f}% of excess return)
 
 Model Confidence: {model_confidence}
 {"✅ High confidence - portfolio matches training data" if model_confidence == "High" else 
