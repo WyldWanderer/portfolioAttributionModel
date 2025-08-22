@@ -1,5 +1,7 @@
 AI assisted project to create a portfolio attribution tool using a combination of Claude and OpenAI tools. 
 
+You can see this live at https://huggingface.co/spaces/WyldWanderer/portfolioAttributionPrototype
+
 WORK IN PROGRESS
 1. Adding more models for different portfolio sizes
 2. Cleanup of diagnostic logging
